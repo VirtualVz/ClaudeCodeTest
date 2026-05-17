@@ -35,3 +35,20 @@ Each HTML file is fully self-contained: inline `<style>` and `<script>` in a sin
 
 ### Python
 `py1.py` is a scratch file.
+
+## GitHub Repository
+
+**Repo:** https://github.com/VirtualVz/ClaudeCodeTest
+
+**Required workflow — after every file change:**
+1. Stage the modified file(s) by name (never `git add -A` or `git add .`)
+2. Commit with a short descriptive message and the co-author trailer:
+   ```
+   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+   ```
+3. Push to `origin master`:
+   ```
+   git push origin master
+   ```
+
+This must happen automatically at the end of every session in which any file is created or modified — do not wait for the user to ask.
