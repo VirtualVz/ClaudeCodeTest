@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Burning Joint</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #1a2010;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  overflow: hidden;
+  font-family: monospace;
+  gap: 16px;
+}
+#scene-canvas {
+  display: block;
+  border-radius: 6px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.75);
+}
+#controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.lbl { color: #556; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; }
+#slider-track {
+  position: relative;
+  width: 360px; height: 8px;
+  background: #111;
+  border-radius: 4px;
+  border: 1px solid #2a2a2a;
+  cursor: pointer;
+}
+#slider-fill {
+  position: absolute; top: 0; left: 0;
+  height: 100%; width: 0%;
+  background: linear-gradient(to right, #ff2200, #ff6600, #ffaa00);
+  border-radius: 4px; pointer-events: none;
+}
+#slider-thumb {
+  position: absolute;
+  width: 20px; height: 20px;
+  top: 50%; left: 0;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle at 40% 35%, #ffdd88, #cc5500);
+  border-radius: 50%;
+  border: 2px solid #ff8800;
+  box-shadow: 0 0 8px #ff660055;
+  cursor: grab; z-index: 10;
+}
+#slider-thumb:active { cursor: grabbing; }
+#pct { color: #ff8800; font-size: 12px; letter-spacing: 2px; min-width: 40px; }
+#status { color: #556; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; min-width: 64px; }
+</style>
+</head>
+<body>
+<canvas id="scene-canvas" width="900" height="600"></canvas>
+<div id="controls">
+  <span class="lbl">Burn</span>
+  <div id="slider-track">
+    <div id="slider-fill"></div>
+    <div id="slider-thumb"></div>
+  </div>
+  <div id="pct">0%</div>
+  <div id="status">Unlit</div>
+</div>
+
+<script>
+const CW = 900, CH = 600;
+const JX = 450;       // joint centre X
+const JR = 11;        // joint radius
+
+// Y geometry top → bottom
+const TIP_TOP  = 54;
+const TIP_END  = 96;
+const BODY_TOP = 96;
+const BODY_BOT = 476;
+const FILT_TOP = 476;
+const FILT_BOT = 526;
+
+const PAPER_LEN = BODY_BOT - BODY_TOP; // 380
+
+const state = { pct: 0 };
+
+// ── Flicker oscillator ────────────────────────────────────────────────────────
+const flk = { v: 0, tgt: 0, vel: 0, tmr: 0 };
+function tickFlicker(p) {
+  if (p <= 0 || p >= 100) { flk.v = 0; return 0; }
+  if (--flk.tmr <= 0) {
+    flk.tgt = Math.random() < 0.13
+      ? 0.5 + Math.random() * 0.5
+      : (Math.random() - 0.3) * 0.55;
+    flk.tmr = 4 + Math.floor(Math.random() * 12);
+  }
+  flk.vel = flk.vel * 0.72 + (flk.tgt - flk.v) * 0.18;
+  flk.v   = Math.max(-0.2, Math.min(1, flk.v + flk.vel));
+  return flk.v;
+}
+
+// ── Stable seeded ash cracks ──────────────────────────────────────────────────
+let _cracks = [], _crackSeed = -1;
+function getAshCracks(ashLen) {
+  const seed = Math.floor(ashLen / 14);
+  if (seed === _crackSeed) return _cracks;
+  _crackSeed = seed;
+  let s = (seed * 2654435761) | 0;
+  const rnd = () => { s = (s * 1664525 + 1013904223) | 0; return (s >>> 0) / 4294967296; };
+  _cracks = [];
+  const n = 3 + Math.floor(rnd() * 3);
+  for (let i = 0; i < n; i++) {
+    _cracks.push({
+      sf: rnd() * 0.25,
+      ef: 0.45 + rnd() * 0.45,
+      cf: 0.2  + rnd() * 0.4,
+      xo: (rnd() - 0.5) * JR * 0.7,
+      cx: (rnd() - 0.5) * JR * 0.5,
+    });
+  }
+  return _cracks;
+}
+
+// ── Pre-computed paper grain (stable every frame) ─────────────────────────────
+const GRAIN = Array.from({ length: 220 }, () => ({
+  yf:    Math.random(),
+  xo:    (Math.random() - 0.5) * JR * 1.3,
+  len:   2 + Math.random() * 7,
+  alpha: 0.04 + Math.random() * 0.07,
+}));
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BACKGROUND — park scene drawn once and cached
+// ══════════════════════════════════════════════════════════════════════════════
+
+function drawBackground(ctx) {
+  // Sky — warm late-afternoon
+  const sky = ctx.createLinearGradient(0, 0, 0, 360);
+  sky.addColorStop(0,    '#3a6098');
+  sky.addColorStop(0.35, '#6898c8');
+  sky.addColorStop(0.7,  '#b8ccdc');
+  sky.addColorStop(1,    '#d8cdb8');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, CW, 360);
+
+  // Sun glow (upper-left — consistent light source)
+  const sunG = ctx.createRadialGradient(70, 70, 0, 70, 70, 200);
+  sunG.addColorStop(0,   'rgba(255,235,130,0.55)');
+  sunG.addColorStop(0.4, 'rgba(255,200,80,0.22)');
+  sunG.addColorStop(1,   'rgba(255,180,60,0)');
+  ctx.fillStyle = sunG;
+  ctx.fillRect(0, 0, CW, 360);
+
+  drawClouds(ctx);
+  drawTreeline(ctx);
+  drawGround(ctx);
+  drawBench(ctx);
+
+  // Vignette
+  const vig = ctx.createRadialGradient(CW / 2, CH / 2, CH * 0.22, CW / 2, CH / 2, CH * 0.88);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.48)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, CW, CH);
+}
+
+function drawClouds(ctx) {
+  const clouds = [
+    { x: 115, y: 52, w: 145, h: 40 },
+    { x: 345, y: 36, w: 205, h: 52 },
+    { x: 655, y: 66, w: 175, h: 44 },
+    { x: 825, y: 38, w: 125, h: 36 },
+  ];
+  for (const c of clouds) {
+    ctx.save();
+    ctx.globalAlpha = 0.75;
+    // Shadow base
+    ctx.fillStyle = 'rgba(170,190,215,0.45)';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y + c.h * 0.32, c.w * 0.5, c.h * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Cloud body blobs
+    ctx.fillStyle = '#eef5fc';
+    for (const [bx, by, bw, bh] of [
+      [c.x - c.w * 0.22, c.y,            c.w * 0.30, c.h * 0.44],
+      [c.x,              c.y - c.h * 0.1, c.w * 0.36, c.h * 0.52],
+      [c.x + c.w * 0.22, c.y + c.h * 0.06, c.w * 0.30, c.h * 0.42],
+      [c.x - c.w * 0.06, c.y + c.h * 0.12, c.w * 0.50, c.h * 0.38],
+    ]) {
+      ctx.beginPath();
+      ctx.ellipse(bx, by, bw, bh, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function drawTreeline(ctx) {
+  const trees = [
+    { x: 38,  bY: 298, w: 58,  h: 134, d: 0.26 },
+    { x: 118, bY: 282, w: 78,  h: 162, d: 0.42 },
+    { x: 208, bY: 290, w: 66,  h: 148, d: 0.36 },
+    { x: 308, bY: 298, w: 52,  h: 122, d: 0.23 },
+    { x: 598, bY: 294, w: 60,  h: 138, d: 0.29 },
+    { x: 688, bY: 284, w: 72,  h: 158, d: 0.39 },
+    { x: 778, bY: 292, w: 62,  h: 143, d: 0.31 },
+    { x: 862, bY: 286, w: 82,  h: 168, d: 0.44 },
+  ];
+  for (const t of trees) {
+    ctx.save();
+    ctx.globalAlpha = t.d + 0.34;
+    const gr = Math.floor(48 + t.d * 38), gg = Math.floor(88 + t.d * 48), gb = Math.floor(28 + t.d * 18);
+    // Trunk
+    ctx.fillStyle = `rgba(55,32,8,${t.d * 0.85 + 0.28})`;
+    ctx.fillRect(t.x - 5, t.bY - t.h * 0.3, 10, t.h * 0.32);
+    // Foliage
+    ctx.fillStyle = `rgb(${gr},${gg},${gb})`;
+    for (const [bx, by, bw, bh] of [
+      [t.x,              t.bY - t.h,        t.w * 0.44, t.h * 0.56],
+      [t.x - t.w * 0.28, t.bY - t.h * 0.75, t.w * 0.37, t.h * 0.50],
+      [t.x + t.w * 0.28, t.bY - t.h * 0.72, t.w * 0.37, t.h * 0.49],
+      [t.x,              t.bY - t.h * 0.50, t.w * 0.50, t.h * 0.46],
+    ]) {
+      ctx.beginPath();
+      ctx.ellipse(bx, by, bw, bh, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Sun-lit edge highlight (upper-left)
+    ctx.fillStyle = `rgba(175,225,75,${t.d * 0.14})`;
+    ctx.beginPath();
+    ctx.ellipse(t.x - t.w * 0.16, t.bY - t.h * 0.86, t.w * 0.24, t.h * 0.30, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawGround(ctx) {
+  // Grass
+  const g = ctx.createLinearGradient(0, 312, 0, CH);
+  g.addColorStop(0,    '#8abb60');
+  g.addColorStop(0.08, '#7aac50');
+  g.addColorStop(0.28, '#5c8c36');
+  g.addColorStop(1,    '#3a5e22');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 312, CW, CH - 312);
+
+  // Footpath (perspective trapezoid)
+  const path = ctx.createLinearGradient(0, 348, 0, CH);
+  path.addColorStop(0,   'rgba(185,175,158,0.72)');
+  path.addColorStop(0.3, 'rgba(168,158,142,0.52)');
+  path.addColorStop(1,   'rgba(142,132,118,0.32)');
+  ctx.fillStyle = path;
+  ctx.beginPath();
+  ctx.moveTo(CW * 0.28, 348);
+  ctx.lineTo(CW * 0.72, 348);
+  ctx.lineTo(CW * 0.90, CH);
+  ctx.lineTo(CW * 0.10, CH);
+  ctx.closePath();
+  ctx.fill();
+
+  // Path edges
+  ctx.strokeStyle = 'rgba(115,108,95,0.28)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(CW * 0.28, 348); ctx.lineTo(CW * 0.10, CH);
+  ctx.moveTo(CW * 0.72, 348); ctx.lineTo(CW * 0.90, CH);
+  ctx.stroke();
+
+  // Dappled light on ground (stable positions via formula)
+  for (let i = 0; i < 14; i++) {
+    const lx = 75 + ((i * 139) % (CW - 150));
+    const ly = 378 + ((i * 101) % 185);
+    const lr = 18 + (i * 11) % 28;
+    const lg = ctx.createRadialGradient(lx, ly, 0, lx, ly, lr);
+    lg.addColorStop(0, 'rgba(255,245,185,0.13)');
+    lg.addColorStop(1, 'rgba(255,245,185,0)');
+    ctx.fillStyle = lg;
+    ctx.beginPath();
+    ctx.ellipse(lx, ly, lr * 1.5, lr * 0.65, Math.PI * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Horizon blend
+  const horiz = ctx.createLinearGradient(0, 306, 0, 340);
+  horiz.addColorStop(0, 'rgba(205,198,178,0.55)');
+  horiz.addColorStop(1, 'rgba(100,145,62,0)');
+  ctx.fillStyle = horiz;
+  ctx.fillRect(0, 306, CW, 34);
+}
+
+function drawBench(ctx) {
+  const bx = JX - 195;
+  const bw = 390;
+  const sy = 536;   // seat top — joint filter bottom (526) rests just above this
+
+  ctx.save();
+
+  // Ground shadow
+  const shad = ctx.createRadialGradient(JX, sy + 30, 0, JX, sy + 30, 190);
+  shad.addColorStop(0, 'rgba(0,0,0,0.30)');
+  shad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = shad;
+  ctx.fillRect(bx - 30, sy + 12, bw + 60, 85);
+
+  // Metal legs
+  ctx.fillStyle = '#252018';
+  for (const lx of [bx + 32, bx + bw - 32]) {
+    // Front leg
+    ctx.beginPath();
+    ctx.rect(lx - 5, sy + 12, 10, 58);
+    ctx.fill();
+    // Angled back leg
+    ctx.fillStyle = 'rgba(28,22,14,0.68)';
+    ctx.beginPath();
+    ctx.rect(lx - 4, sy + 6, 8, 52);
+    ctx.fill();
+    ctx.fillStyle = '#252018';
+  }
+  // Horizontal cross brace
+  ctx.strokeStyle = '#252018';
+  ctx.lineWidth = 8;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(bx + 32, sy + 52);
+  ctx.lineTo(bx + bw - 32, sy + 52);
+  ctx.stroke();
+
+  // Seat slats
+  const seatSlats = [
+    { y: sy,      h: 10, base: '#c88840' },
+    { y: sy + 13, h: 10, base: '#b87c36' },
+    { y: sy + 26, h: 10, base: '#c88840' },
+    { y: sy + 39, h: 10, base: '#b87c36' },
+    { y: sy + 52, h: 10, base: '#c88840' },
+  ];
+  for (const sl of seatSlats) {
+    const sg = ctx.createLinearGradient(0, sl.y, 0, sl.y + sl.h);
+    sg.addColorStop(0,   '#e8aa62');
+    sg.addColorStop(0.3, sl.base);
+    sg.addColorStop(0.75,'#8a5028');
+    sg.addColorStop(1,   '#6a381a');
+    ctx.fillStyle = sg;
+    ctx.beginPath();
+    ctx.rect(bx + 20, sl.y, bw - 40, sl.h);
+    ctx.fill();
+    // Wood grain
+    ctx.strokeStyle = 'rgba(75,38,8,0.11)';
+    ctx.lineWidth = 0.6;
+    for (let gx = bx + 32; gx < bx + bw - 32; gx += 24) {
+      const wl = 5 + (gx % 14);
+      ctx.beginPath();
+      ctx.moveTo(gx, sl.y + 2);
+      ctx.bezierCurveTo(gx + wl * 0.3, sl.y + 4, gx + wl * 0.7, sl.y + 6, gx + wl, sl.y + sl.h - 1);
+      ctx.stroke();
+    }
+    // Top specular
+    ctx.strokeStyle = 'rgba(255,240,185,0.16)';
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(bx + 24, sl.y + 0.5);
+    ctx.lineTo(bx + bw - 24, sl.y + 0.5);
+    ctx.stroke();
+  }
+
+  // Backrest slats (behind the joint position)
+  const backY = sy - 70;
+  for (let i = 0; i < 3; i++) {
+    const by2 = backY + i * 15;
+    const bg = ctx.createLinearGradient(0, by2, 0, by2 + 10);
+    bg.addColorStop(0,   '#d89050');
+    bg.addColorStop(0.45,'#b07838');
+    bg.addColorStop(1,   '#7a5028');
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.rect(bx + 20, by2, bw - 40, 10);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,230,165,0.10)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(bx + 24, by2 + 0.5);
+    ctx.lineTo(bx + bw - 24, by2 + 0.5);
+    ctx.stroke();
+  }
+  // Backrest posts
+  ctx.fillStyle = '#252018';
+  for (const px of [bx + 50, bx + bw - 50]) {
+    ctx.beginPath();
+    ctx.rect(px - 4, backY - 2, 8, sy - backY + 10);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// JOINT LAYERS
+// ══════════════════════════════════════════════════════════════════════════════
+
+function drawJointShadow(ctx) {
+  ctx.save();
+  const g = ctx.createRadialGradient(JX + 10, FILT_BOT + 12, 0, JX + 10, FILT_BOT + 12, 38);
+  g.addColorStop(0, 'rgba(0,0,0,0.38)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.ellipse(JX + 6, FILT_BOT + 8, 22, 9, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawFilter(ctx) {
+  ctx.save();
+  const r = JR;
+  const y0 = FILT_TOP, y1 = FILT_BOT;
+
+  // Clip: rect top, rounded bottom cap
+  ctx.beginPath();
+  ctx.moveTo(JX - r, y0);
+  ctx.lineTo(JX - r, y1 - r);
+  ctx.arc(JX, y1 - r, r, Math.PI, 0, false);
+  ctx.lineTo(JX + r, y0);
+  ctx.closePath();
+  ctx.clip();
+
+  // 3D cylindrical gradient — left shadow, highlight peak ~45% from left
+  const g = ctx.createLinearGradient(JX - r, 0, JX + r, 0);
+  g.addColorStop(0,    '#1e0c02');
+  g.addColorStop(0.10, '#542a0e');
+  g.addColorStop(0.28, '#9a5e2e');
+  g.addColorStop(0.45, '#d09252');
+  g.addColorStop(0.54, '#e8b46c');   // highlight
+  g.addColorStop(0.68, '#be8240');
+  g.addColorStop(0.84, '#7a4018');
+  g.addColorStop(1,    '#1e0c02');
+  ctx.fillStyle = g;
+  ctx.fillRect(JX - r, y0, r * 2, y1 - y0);
+
+  // Warm sun-bounce on left rim
+  const sunR = ctx.createLinearGradient(JX - r, 0, JX - r + 3.5, 0);
+  sunR.addColorStop(0, 'rgba(255,195,90,0.14)');
+  sunR.addColorStop(1, 'rgba(255,195,90,0)');
+  ctx.fillStyle = sunR;
+  ctx.fillRect(JX - r, y0, 3.5, y1 - y0);
+
+  // Spiral cardboard texture lines
+  for (let i = 0; i < 5; i++) {
+    const ty = y0 + (i / 4) * (y1 - y0 - 14);
+    ctx.strokeStyle = 'rgba(55,22,4,0.32)';
+    ctx.lineWidth = 0.9;
+    ctx.beginPath();
+    ctx.moveTo(JX - r + 2, ty);
+    ctx.lineTo(JX + r - 2, ty + 11);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(195,145,65,0.11)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(JX - r + 2, ty - 0.5);
+    ctx.lineTo(JX + r - 2, ty + 10.5);
+    ctx.stroke();
+  }
+
+  // Top join shadow
+  ctx.strokeStyle = 'rgba(0,0,0,0.50)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(JX - r, y0);
+  ctx.lineTo(JX + r, y0);
+  ctx.stroke();
+
+  // Specular strip (sun from upper-left)
+  const spec = ctx.createLinearGradient(JX - r, 0, JX - r + 5, 0);
+  spec.addColorStop(0, 'rgba(255,255,225,0.38)');
+  spec.addColorStop(1, 'rgba(255,255,225,0)');
+  ctx.fillStyle = spec;
+  ctx.fillRect(JX - r, y0, 5, y1 - y0);
+
+  ctx.restore();
+}
+
+function drawPaper(ctx, cherryY) {
+  const y0 = cherryY, y1 = BODY_BOT;
+  if (y0 >= y1) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(JX - JR - 1, y0, JR * 2 + 2, y1 - y0);
+  ctx.clip();
+
+  // 3D cylinder gradient
+  const g = ctx.createLinearGradient(JX - JR, 0, JX + JR, 0);
+  g.addColorStop(0,    '#b0a070');
+  g.addColorStop(0.12, '#cfc090');
+  g.addColorStop(0.30, '#f0e8c2');
+  g.addColorStop(0.47, '#faf5de');   // highlight
+  g.addColorStop(0.58, '#f0e6c0');
+  g.addColorStop(0.76, '#d6ca90');
+  g.addColorStop(0.90, '#bead70');
+  g.addColorStop(1,    '#9e9050');
+  ctx.fillStyle = g;
+  ctx.fillRect(JX - JR, y0, JR * 2, y1 - y0);
+
+  // Paper grain (pre-computed)
+  for (const gr of GRAIN) {
+    const gy = y0 + gr.yf * (y1 - y0);
+    ctx.strokeStyle = `rgba(118,96,38,${gr.alpha})`;
+    ctx.lineWidth = 0.4;
+    ctx.beginPath();
+    ctx.moveTo(JX + gr.xo - gr.len * 0.5, gy);
+    ctx.lineTo(JX + gr.xo + gr.len * 0.5, gy);
+    ctx.stroke();
+  }
+
+  // Rolling seam
+  ctx.strokeStyle = 'rgba(155,125,55,0.28)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(JX + 2.5, y0);
+  ctx.lineTo(JX + 4,   y1);
+  ctx.stroke();
+
+  // Edge outlines
+  ctx.strokeStyle = 'rgba(0,0,0,0.14)';
+  ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(JX - JR, y0); ctx.lineTo(JX - JR, y1);
+  ctx.moveTo(JX + JR, y0); ctx.lineTo(JX + JR, y1);
+  ctx.stroke();
+
+  // Specular
+  const spec = ctx.createLinearGradient(JX - JR, 0, JX - JR + 5, 0);
+  spec.addColorStop(0, 'rgba(255,255,240,0.32)');
+  spec.addColorStop(1, 'rgba(255,255,240,0)');
+  ctx.fillStyle = spec;
+  ctx.fillRect(JX - JR, y0, 5, y1 - y0);
+
+  ctx.restore();
+}
+
+function drawAsh(ctx, cherryY, p) {
+  if (cherryY <= BODY_TOP) return;
+  const y0 = BODY_TOP, y1 = cherryY;
+  const ashLen = y1 - y0;
+  const ashR   = JR * (1 - (ashLen / PAPER_LEN) * 0.07);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(JX - ashR - 1, y0, ashR * 2 + 2, y1 - y0);
+  ctx.clip();
+
+  // 3D cylindrical ash
+  const g = ctx.createLinearGradient(JX - ashR, 0, JX + ashR, 0);
+  g.addColorStop(0,    '#686868');
+  g.addColorStop(0.18, '#a8a8a8');
+  g.addColorStop(0.42, '#cecece');
+  g.addColorStop(0.54, '#e0e0e0');   // highlight
+  g.addColorStop(0.72, '#bebebe');
+  g.addColorStop(0.88, '#9c9c9c');
+  g.addColorStop(1,    '#646464');
+  ctx.fillStyle = g;
+  ctx.fillRect(JX - ashR, y0, ashR * 2, y1 - y0);
+
+  // Fresh ash at cherry interface (warm-tinged, lighter)
+  const fh = Math.min(ashLen, 18);
+  const gf = ctx.createLinearGradient(0, y1 - fh, 0, y1);
+  gf.addColorStop(0, 'rgba(228,212,188,0)');
+  gf.addColorStop(1, 'rgba(235,222,202,0.82)');
+  ctx.fillStyle = gf;
+  ctx.fillRect(JX - ashR, y1 - fh, ashR * 2, fh);
+
+  // Horizontal banding (compressed paper rings)
+  ctx.strokeStyle = 'rgba(72,72,72,0.08)';
+  ctx.lineWidth = 0.55;
+  for (let y = y0 + 5; y < y1 - 4; y += 6.5) {
+    ctx.beginPath();
+    ctx.moveTo(JX - ashR + 2, y);
+    ctx.lineTo(JX + ashR - 2, y);
+    ctx.stroke();
+  }
+
+  // Vertical surface cracks
+  for (const cr of getAshCracks(ashLen)) {
+    const cy0 = y0 + ashLen * cr.sf;
+    const cy1 = y0 + ashLen * cr.ef;
+    const cpy = y0 + ashLen * cr.cf;
+    if (cy1 > y1) continue;
+    ctx.strokeStyle = 'rgba(65,65,65,0.30)';
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(JX + cr.xo, cy0);
+    ctx.quadraticCurveTo(JX + cr.cx, cpy, JX + cr.xo, cy1);
+    ctx.stroke();
+  }
+
+  // Specular
+  const spec = ctx.createLinearGradient(JX - ashR, 0, JX - ashR + 4, 0);
+  spec.addColorStop(0, 'rgba(255,255,255,0.22)');
+  spec.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = spec;
+  ctx.fillRect(JX - ashR, y0, 4, y1 - y0);
+
+  ctx.restore();
+}
+
+function drawTwist(ctx, p) {
+  // Twist present until burn starts (fades 0→6%)
+  const alpha = p < 6 ? 1 - p / 6 : 0;
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  const y0 = TIP_TOP, y1 = TIP_END;
+
+  // Tapered shape: point at top, full width at bottom
+  ctx.beginPath();
+  ctx.moveTo(JX, y0);
+  ctx.bezierCurveTo(JX - 2, y0 + 10, JX - JR + 3, y0 + 22, JX - JR, y1);
+  ctx.lineTo(JX + JR, y1);
+  ctx.bezierCurveTo(JX + JR - 3, y0 + 22, JX + 2, y0 + 10, JX, y0);
+  ctx.closePath();
+
+  const g = ctx.createLinearGradient(JX - JR, 0, JX + JR, 0);
+  g.addColorStop(0,   '#aea060');
+  g.addColorStop(0.30,'#dcd290');
+  g.addColorStop(0.50,'#f8f0d0');
+  g.addColorStop(0.70,'#d8cc84');
+  g.addColorStop(1,   '#a09850');
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.clip();
+
+  // Wrinkle lines
+  ctx.strokeStyle = 'rgba(125,105,48,0.30)';
+  ctx.lineWidth = 0.85;
+  for (const [x1, y1w, x2, y2w] of [
+    [JX - 5, y0 + 5,  JX - 2, y0 + 19],
+    [JX + 4, y0 + 7,  JX + 2, y0 + 21],
+    [JX - 7, y0 + 14, JX - 4, y0 + 29],
+    [JX + 6, y0 + 12, JX + 3, y0 + 27],
+    [JX - 3, y0 + 23, JX,     y0 + 36],
+  ]) {
+    ctx.beginPath();
+    ctx.moveTo(x1, y1w);
+    ctx.lineTo(x2, y2w);
+    ctx.stroke();
+  }
+
+  // Specular
+  const spec = ctx.createLinearGradient(JX - JR, 0, JX - JR + 4, 0);
+  spec.addColorStop(0, 'rgba(255,255,240,0.30)');
+  spec.addColorStop(1, 'rgba(255,255,240,0)');
+  ctx.fillStyle = spec;
+  ctx.fillRect(JX - JR, y0, 4, y1 - y0);
+
+  ctx.restore();
+}
+
+function drawCherry(ctx, cy, p, fv) {
+  if (p <= 0 || p >= 100) return;
+  const grow = p < 5 ? p / 5 : p > 97 ? (100 - p) / 3 : 1;
+  const rx = (JR + 3 + fv * 2.2) * grow;
+  const ry = (JR * 0.72 + fv * 1.3) * grow;
+
+  ctx.save();
+
+  // Outermost dim ambient halo
+  const halo = ctx.createRadialGradient(JX, cy, 0, JX, cy, rx * 4.5);
+  halo.addColorStop(0,   `rgba(255,115,0,${0.14 * grow})`);
+  halo.addColorStop(0.55,`rgba(255,55,0,${0.05 * grow})`);
+  halo.addColorStop(1,   'rgba(255,30,0,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.ellipse(JX, cy, rx * 4.5, ry * 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mid glow ring
+  const mg = ctx.createRadialGradient(JX, cy, 0, JX, cy, rx * 2.2);
+  mg.addColorStop(0,   `rgba(255,145,0,${0.92 * grow})`);
+  mg.addColorStop(0.42,`rgba(235,62,0,${0.78 * grow})`);
+  mg.addColorStop(0.82,`rgba(195,18,0,${0.38 * grow})`);
+  mg.addColorStop(1,   'rgba(175,8,0,0)');
+  ctx.fillStyle = mg;
+  ctx.beginPath();
+  ctx.ellipse(JX, cy, rx * 2.2, ry * 1.7, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Core ember
+  const cg = ctx.createRadialGradient(JX, cy, 0, JX, cy, rx * 1.15);
+  cg.addColorStop(0,    `rgba(255,242,182,${grow})`);
+  cg.addColorStop(0.35, `rgba(255,182,22,${0.95 * grow})`);
+  cg.addColorStop(0.72, `rgba(228,58,0,${0.72 * grow})`);
+  cg.addColorStop(1,    'rgba(198,18,0,0)');
+  ctx.fillStyle = cg;
+  ctx.beginPath();
+  ctx.ellipse(JX, cy, rx * 1.15, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // White-hot centre
+  const wg = ctx.createRadialGradient(JX, cy, 0, JX, cy, rx * 0.52);
+  wg.addColorStop(0,   `rgba(255,255,248,${grow})`);
+  wg.addColorStop(0.50,`rgba(255,242,158,${0.80 * grow})`);
+  wg.addColorStop(1,   'rgba(255,200,0,0)');
+  ctx.fillStyle = wg;
+  ctx.beginPath();
+  ctx.ellipse(JX, cy, rx * 0.52, ry * 0.45, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Ember rim (ash bowl edge)
+  if (grow > 0.5) {
+    ctx.strokeStyle = `rgba(75,55,38,${0.65 * grow})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(JX, cy, rx * 1.08, ry * 0.98, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RENDER LOOP
+// ══════════════════════════════════════════════════════════════════════════════
+
+const canvas = document.getElementById('scene-canvas');
+const ctx    = canvas.getContext('2d');
+
+// Cache static background
+drawBackground(ctx);
+const bgData = ctx.getImageData(0, 0, CW, CH);
+
+function render() {
+  ctx.putImageData(bgData, 0, 0);
+
+  const p  = state.pct;
+  const fv = tickFlicker(p);
+  // Cherry burns downward: 0% → top of paper, 100% → bottom of paper
+  const cherryY = BODY_TOP + PAPER_LEN * (p / 100);
+
+  // Canvas ember glow
+  if (p > 0 && p < 100) {
+    const blur = 10 + fv * 22;
+    const op   = (0.20 + fv * 0.26) * Math.min(p / 8, 1);
+    canvas.style.boxShadow = `0 0 ${blur}px ${Math.round(blur * 0.55)}px rgba(255,105,0,${op.toFixed(2)})`;
+  } else {
+    canvas.style.boxShadow = 'none';
+  }
+
+  drawJointShadow(ctx);
+  if (p > 0) drawAsh(ctx, cherryY, p);
+  drawPaper(ctx, cherryY);
+  drawTwist(ctx, p);
+  drawCherry(ctx, cherryY, p, fv);
+  drawFilter(ctx);
+
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+
+// ── Slider (horizontal) ───────────────────────────────────────────────────────
+const track    = document.getElementById('slider-track');
+const thumb    = document.getElementById('slider-thumb');
+const fillEl   = document.getElementById('slider-fill');
+const pctEl    = document.getElementById('pct');
+const statusEl = document.getElementById('status');
+
+let drag = false;
+const TW = 20;
+
+function pctFromX(clientX) {
+  const rect = track.getBoundingClientRect();
+  return Math.max(0, Math.min(1, (clientX - rect.left - TW / 2) / (rect.width - TW))) * 100;
+}
+
+function setPct(pct) {
+  state.pct = pct;
+  const r  = pct / 100;
+  const tw = (track.getBoundingClientRect().width || 360) - TW;
+  thumb.style.left  = (r * tw + TW / 2) + 'px';
+  fillEl.style.width = (r * 100) + '%';
+  pctEl.textContent  = Math.round(pct) + '%';
+  statusEl.textContent =
+    pct === 0   ? 'Unlit'     :
+    pct < 5     ? 'Lighting'  :
+    pct < 30    ? 'Fresh'     :
+    pct < 60    ? 'Burning'   :
+    pct < 90    ? 'Deep burn' :
+    pct < 100   ? 'Roach'     : 'Done';
+}
+
+thumb.addEventListener('mousedown', e => { drag = true; e.preventDefault(); });
+document.addEventListener('mousemove', e => { if (drag) setPct(pctFromX(e.clientX)); });
+document.addEventListener('mouseup',   () => { drag = false; });
+thumb.addEventListener('touchstart', e => { drag = true; e.preventDefault(); }, { passive: false });
+document.addEventListener('touchmove', e => { if (drag) setPct(pctFromX(e.touches[0].clientX)); }, { passive: false });
+document.addEventListener('touchend',  () => { drag = false; });
+track.addEventListener('click', e => setPct(pctFromX(e.clientX)));
+</script>
+</body>
+</html>
