@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Burning Joint</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0a0a0f;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  overflow: hidden;
+  font-family: monospace;
+}
+
+#scene {
+  display: flex;
+  align-items: center;
+  gap: 40px;
+}
+
+#joint-canvas {
+  display: block;
+  border-radius: 4px;
+}
+
+#slider-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.slider-label {
+  color: #444;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+#slider-track {
+  position: relative;
+  width: 8px;
+  height: 340px;
+  background: linear-gradient(to bottom, #1c1c1c, #222);
+  border-radius: 4px;
+  border: 1px solid #2a2a2a;
+  cursor: pointer;
+}
+
+#slider-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 0%;
+  background: linear-gradient(to bottom, #ff2200, #ff6600, #ffaa00);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+#slider-thumb {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  top: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: radial-gradient(circle at 40% 35%, #ffdd88, #cc5500);
+  border-radius: 50%;
+  border: 2px solid #ff8800;
+  box-shadow: 0 0 10px #ff660066, 0 0 20px #ff440033;
+  cursor: grab;
+  z-index: 10;
+}
+
+#slider-thumb:active { cursor: grabbing; }
+
+#pct-display {
+  color: #ff8800;
+  font-size: 13px;
+  letter-spacing: 2px;
+  min-width: 45px;
+  text-align: center;
+}
+
+#status-label {
+  color: #333;
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-align: center;
+  max-width: 60px;
+  text-transform: uppercase;
+  min-height: 20px;
+}
+</style>
+</head>
+<body>
+<div id="scene">
+  <div id="slider-container">
+    <div class="slider-label">Burn</div>
+    <div id="slider-track">
+      <div id="slider-fill"></div>
+      <div id="slider-thumb"></div>
+    </div>
+    <div id="pct-display">0%</div>
+    <div id="status-label">Unlit</div>
+  </div>
+  <canvas id="joint-canvas" width="600" height="220"></canvas>
+</div>
+
+<script>
+// ─── Constants ───────────────────────────────────────────────────────────────
+const CW = 600, CH = 220, CY = 115;
+const JOINT_R = 9;
+
+const TWIST_START  = 38;
+const TWIST_END    = 82;
+const BODY_START   = 82;
+const FILTER_START = 512;
+const FILTER_END   = 562;
+const PAPER_LEN    = FILTER_START - BODY_START; // 430
+
+// ─── Colors ──────────────────────────────────────────────────────────────────
+const C = {
+  paperTop:    '#f5edd0',
+  paperMid:    '#e8d9b0',
+  paperShad:   '#c8b888',
+  paperSeam:   'rgba(100,80,30,0.18)',
+  ashLight:    '#d2d2d2',
+  ashMid:      '#a8a8a8',
+  ashDark:     '#888888',
+  ashFresh:    '#e8e8e8',
+  filterTop:   '#c8a050',
+  filterMid:   '#9a7030',
+  filterShad:  '#7a5418',
+  filterEnd:   '#b89040',
+};
+
+// ─── State ────────────────────────────────────────────────────────────────────
+const state = { burnPercent: 0 };
+
+// ─── Flicker ─────────────────────────────────────────────────────────────────
+const flicker = { value: 0, target: 0, vel: 0, timer: 0 };
+
+function updateFlicker(p) {
+  if (p <= 0 || p >= 100) { flicker.value = 0; return 0; }
+  flicker.timer--;
+  if (flicker.timer <= 0) {
+    const spike = Math.random() < 0.12;
+    flicker.target = spike ? 0.55 + Math.random() * 0.45 : (Math.random() - 0.25) * 0.5;
+    flicker.timer = 4 + Math.floor(Math.random() * 10);
+  }
+  flicker.vel = flicker.vel * 0.72 + (flicker.target - flicker.value) * 0.18;
+  flicker.value = Math.max(-0.2, Math.min(1.0, flicker.value + flicker.vel));
+  return flicker.value;
+}
+
+// ─── Particle System ─────────────────────────────────────────────────────────
+class Particle {
+  constructor(x, y) {
+    this.x = x + (Math.random() - 0.5) * 5;
+    this.y = y - JOINT_R - 1;
+    this.vx = (Math.random() - 0.5) * 0.5;
+    this.vy = -(0.35 + Math.random() * 0.65);
+    this.ax = (Math.random() - 0.5) * 0.018;
+    this.r  = 2 + Math.random() * 2;
+    this.maxR = 16 + Math.random() * 22;
+    this.life = 0;
+    this.maxLife = 80 + Math.random() * 70;
+    this.opacity = 0;
+    this.wobble = Math.random() * Math.PI * 2;
+    this.light = Math.random() < 0.5;
+  }
+  update() {
+    this.life++;
+    const t = this.life / this.maxLife;
+    this.vx += this.ax; this.vx *= 0.99;
+    this.vy *= 0.997;
+    this.x += this.vx + Math.sin(this.wobble + this.life * 0.05) * 0.35;
+    this.y += this.vy;
+    this.r += (this.maxR - this.r) * 0.014;
+    if (t < 0.2)       this.opacity = (t / 0.2) * 0.38;
+    else if (t < 0.65) this.opacity = 0.38;
+    else               this.opacity = ((1 - t) / 0.35) * 0.38;
+    return this.life < this.maxLife;
+  }
+}
+
+class ParticleSystem {
+  constructor() { this.list = []; this.acc = 0; }
+  update(cx, cy, p) {
+    const rate = p <= 0 || p >= 100 ? 0
+      : p < 5  ? (p / 5) * 0.38
+      : p > 95 ? ((100 - p) / 5) * 0.32
+      : 0.32 + Math.random() * 0.14;
+    this.acc += rate;
+    while (this.acc >= 1) { this.list.push(new Particle(cx, cy)); this.acc -= 1; }
+    this.list = this.list.filter(p => p.update());
+  }
+  render(ctx) {
+    for (const p of this.list) {
+      const base = p.light ? '205,205,205,' : '145,145,145,';
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+      g.addColorStop(0,   `rgba(${base}${p.opacity})`);
+      g.addColorStop(0.55,`rgba(${base}${p.opacity * 0.5})`);
+      g.addColorStop(1,   `rgba(${base}0)`);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
+    }
+  }
+}
+
+const particles = new ParticleSystem();
+
+// ─── Ash crack cache ─────────────────────────────────────────────────────────
+let ashCracks = [];
+let lastAshSeed = -1;
+
+function buildAshCracks(ashLen) {
+  const seed = Math.floor(ashLen / 12);
+  if (seed === lastAshSeed) return;
+  lastAshSeed = seed;
+  ashCracks = [];
+  const n = 2 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < n; i++) {
+    const yOff = -JOINT_R * 0.4 + Math.random() * JOINT_R * 0.5;
+    const startFrac = Math.random() * 0.3;
+    const endFrac   = 0.4 + Math.random() * 0.5;
+    const cpFrac    = (startFrac + endFrac) / 2 + (Math.random() - 0.5) * 0.2;
+    const cpYOff    = yOff + (Math.random() - 0.5) * 3;
+    ashCracks.push({ startFrac, endFrac, cpFrac, yOff, cpYOff });
+  }
+}
+
+// ─── Draw functions ───────────────────────────────────────────────────────────
+
+function drawAmbientGlow(ctx, cx, p, fv) {
+  if (p <= 0 || p >= 100) return;
+  const intensity = Math.min(p / 10, 1) * (0.18 + fv * 0.14);
+  const radius = 90 + fv * 30;
+  const g = ctx.createRadialGradient(cx, CY, 0, cx, CY, radius);
+  g.addColorStop(0,   `rgba(255,100,0,${intensity})`);
+  g.addColorStop(0.5, `rgba(255,50,0,${intensity * 0.3})`);
+  g.addColorStop(1,   'rgba(255,30,0,0)');
+  ctx.beginPath();
+  ctx.arc(cx, CY, radius, 0, Math.PI * 2);
+  ctx.fillStyle = g;
+  ctx.fill();
+}
+
+function drawAsh(ctx, cherryX, p) {
+  if (cherryX <= BODY_START) return;
+  const ashLen = cherryX - BODY_START;
+  const ashR = JOINT_R * (1 - (ashLen / PAPER_LEN) * 0.07);
+  const x0 = BODY_START, x1 = cherryX;
+
+  // Main ash body
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(x0, CY - ashR);
+  ctx.lineTo(x1, CY - ashR);
+  ctx.lineTo(x1, CY + ashR);
+  ctx.lineTo(x0, CY + ashR);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, CY - ashR, 0, CY + ashR);
+  g.addColorStop(0,    C.ashLight);
+  g.addColorStop(0.35, C.ashMid);
+  g.addColorStop(0.65, C.ashDark);
+  g.addColorStop(1,    C.ashMid);
+  ctx.fillStyle = g;
+  ctx.fill();
+
+  // Fresh ash zone near cherry (lighter edge)
+  const freshW = Math.min(ashLen, 10);
+  const gf = ctx.createLinearGradient(x1 - freshW, 0, x1, 0);
+  gf.addColorStop(0, 'rgba(232,232,232,0)');
+  gf.addColorStop(1, `rgba(232,232,232,0.7)`);
+  ctx.fillStyle = gf;
+  ctx.fillRect(x1 - freshW, CY - ashR, freshW, ashR * 2);
+
+  // Horizontal banding (compressed paper rings)
+  ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+  ctx.lineWidth = 0.7;
+  for (let x = x0 + 4; x < x1 - 2; x += 8) {
+    ctx.beginPath();
+    ctx.moveTo(x, CY - ashR + 1);
+    ctx.lineTo(x, CY + ashR - 1);
+    ctx.stroke();
+  }
+
+  // Lengthwise cracks
+  buildAshCracks(ashLen);
+  ctx.strokeStyle = 'rgba(80,80,80,0.25)';
+  ctx.lineWidth = 0.8;
+  for (const cr of ashCracks) {
+    const sx = x0 + ashLen * cr.startFrac;
+    const ex = x0 + ashLen * cr.endFrac;
+    const cpx = x0 + ashLen * cr.cpFrac;
+    if (ex > x1) continue;
+    ctx.beginPath();
+    ctx.moveTo(sx, CY + cr.yOff);
+    ctx.quadraticCurveTo(cpx, CY + cr.cpYOff, ex, CY + cr.yOff + (Math.random() - 0.5));
+    ctx.stroke();
+  }
+
+  // Slight gravity sag at ash end
+  const sag = Math.min(ashLen / PAPER_LEN * 3.5, 3.5);
+  if (sag > 0.5) {
+    ctx.beginPath();
+    ctx.moveTo(x0, CY + ashR);
+    ctx.quadraticCurveTo((x0 + x1) / 2, CY + ashR + sag, x1, CY + ashR);
+    ctx.lineTo(x1, CY + ashR - 1);
+    ctx.quadraticCurveTo((x0 + x1) / 2, CY + ashR + sag - 1, x0, CY + ashR - 1);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(80,80,80,0.15)';
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPaper(ctx, cherryX, p) {
+  const x0 = Math.max(cherryX, BODY_START);
+  const x1 = FILTER_START;
+  if (x0 >= x1) return;
+
+  ctx.save();
+  // Clip to paper zone
+  ctx.beginPath();
+  ctx.rect(x0, CY - JOINT_R - 1, x1 - x0, JOINT_R * 2 + 2);
+  ctx.clip();
+
+  // Cylinder gradient
+  const g = ctx.createLinearGradient(0, CY - JOINT_R, 0, CY + JOINT_R);
+  g.addColorStop(0,    '#faf3dc');
+  g.addColorStop(0.18, C.paperTop);
+  g.addColorStop(0.5,  C.paperMid);
+  g.addColorStop(0.72, C.paperShad);
+  g.addColorStop(1,    '#d4c890');
+  ctx.fillStyle = g;
+  ctx.fillRect(x0, CY - JOINT_R, x1 - x0, JOINT_R * 2);
+
+  // Paper grain lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.028)';
+  ctx.lineWidth = 0.5;
+  for (let y = CY - JOINT_R + 3; y < CY + JOINT_R; y += 4) {
+    ctx.beginPath();
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x1, y);
+    ctx.stroke();
+  }
+
+  // Rolling seam
+  ctx.strokeStyle = C.paperSeam;
+  ctx.lineWidth = 0.9;
+  ctx.beginPath();
+  ctx.moveTo(x0, CY + 2);
+  ctx.lineTo(x1, CY + 2);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawTwist(ctx, p) {
+  const alpha = p < 5 ? 1 - p / 5 : 0;
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // Twist outline path
+  ctx.beginPath();
+  ctx.moveTo(TWIST_START, CY);
+  ctx.bezierCurveTo(TWIST_START + 10, CY - 1, TWIST_END - 12, CY - JOINT_R + 1, TWIST_END, CY - JOINT_R);
+  ctx.lineTo(TWIST_END, CY + JOINT_R);
+  ctx.bezierCurveTo(TWIST_END - 12, CY + JOINT_R - 1, TWIST_START + 10, CY + 1, TWIST_START, CY);
+  ctx.closePath();
+
+  // Fill with paper gradient
+  const g = ctx.createLinearGradient(0, CY - JOINT_R, 0, CY + JOINT_R);
+  g.addColorStop(0,    '#f8f0d5');
+  g.addColorStop(0.3,  C.paperTop);
+  g.addColorStop(0.6,  C.paperMid);
+  g.addColorStop(1,    '#ccc090');
+  ctx.fillStyle = g;
+  ctx.fill();
+
+  // Clip wrinkle strokes to twist shape
+  ctx.clip();
+  ctx.strokeStyle = 'rgba(120,105,70,0.22)';
+  ctx.lineWidth = 0.9;
+  const angles = [30, -25, 40, -35];
+  for (let i = 0; i < 4; i++) {
+    const cx2 = TWIST_START + (TWIST_END - TWIST_START) * (0.15 + i * 0.2);
+    const rad = angles[i] * Math.PI / 180;
+    const len = 22;
+    ctx.beginPath();
+    ctx.moveTo(cx2 - Math.cos(rad) * len, CY - Math.sin(rad) * len);
+    ctx.lineTo(cx2 + Math.cos(rad) * len, CY + Math.sin(rad) * len);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawCherry(ctx, cx, p, fv) {
+  if (p <= 0 || p >= 100) return;
+  const growFactor = p < 5 ? p / 5 : p > 97 ? (100 - p) / 3 : 1;
+  const rx = (7 + fv * 1.2) * growFactor;
+  const ry = (5.5 + fv * 0.9) * growFactor;
+
+  ctx.save();
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx, CY, rx * 2.8 * (1 + fv * 0.15), ry * 2.5 * (1 + fv * 0.1), 0, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(180,20,0,${0.15 * growFactor})`;
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx, CY, rx * 1.8, ry * 1.6, 0, 0, Math.PI * 2);
+  const g2 = ctx.createRadialGradient(cx, CY, 0, cx, CY, rx * 1.8);
+  g2.addColorStop(0,   `rgba(255,140,0,${0.9 * growFactor})`);
+  g2.addColorStop(0.6, `rgba(220,50,0,${0.7 * growFactor})`);
+  g2.addColorStop(1,   `rgba(180,20,0,0)`);
+  ctx.fillStyle = g2;
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx, CY, rx * 1.1, ry, 0, 0, Math.PI * 2);
+  const g3 = ctx.createRadialGradient(cx, CY, 0, cx, CY, rx * 1.1);
+  g3.addColorStop(0,   `rgba(255,230,80,${growFactor})`);
+  g3.addColorStop(0.5, `rgba(255,120,0,${0.9 * growFactor})`);
+  g3.addColorStop(1,   `rgba(220,40,0,0)`);
+  ctx.fillStyle = g3;
+  ctx.fill();
+  ctx.restore();
+
+  // White-hot core
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx - 0.5, CY, rx * 0.38, ry * 0.35, 0, 0, Math.PI * 2);
+  const gc = ctx.createRadialGradient(cx - 0.5, CY, 0, cx - 0.5, CY, rx * 0.38);
+  gc.addColorStop(0,   `rgba(255,255,240,${growFactor})`);
+  gc.addColorStop(0.6, `rgba(255,240,140,${0.7 * growFactor})`);
+  gc.addColorStop(1,   'rgba(255,200,0,0)');
+  ctx.fillStyle = gc;
+  ctx.fill();
+  ctx.restore();
+
+  ctx.restore();
+}
+
+function drawFilter(ctx) {
+  const x0 = FILTER_START, x1 = FILTER_END;
+  const r = JOINT_R;
+
+  ctx.save();
+
+  // Main body
+  const g = ctx.createLinearGradient(0, CY - r, 0, CY + r);
+  g.addColorStop(0,    '#d4b060');
+  g.addColorStop(0.25, C.filterTop);
+  g.addColorStop(0.55, C.filterMid);
+  g.addColorStop(0.8,  C.filterShad);
+  g.addColorStop(1,    '#9a7030');
+  ctx.fillStyle = g;
+  ctx.fillRect(x0, CY - r, x1 - x0, r * 2);
+
+  // Rounded mouth end
+  ctx.beginPath();
+  ctx.arc(x1, CY, r, -Math.PI / 2, Math.PI / 2);
+  ctx.fillStyle = C.filterEnd;
+  ctx.fill();
+
+  // Cardboard spiral lines
+  const fw = x1 - x0;
+  for (let i = 0; i < 6; i++) {
+    const x = x0 + (i / 5) * fw;
+    const alpha = 0.07 + Math.abs(i - 2.5) / 2.5 * 0.09;
+    ctx.beginPath();
+    ctx.moveTo(x, CY - r + 1);
+    ctx.lineTo(x, CY + r - 1);
+    ctx.strokeStyle = `rgba(0,0,0,${alpha})`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Left join edge
+  ctx.beginPath();
+  ctx.moveTo(x0, CY - r);
+  ctx.lineTo(x0, CY + r);
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawSpecular(ctx, p) {
+  const x0 = BODY_START, x1 = FILTER_END;
+  const g = ctx.createLinearGradient(0, CY - JOINT_R, 0, CY - JOINT_R + 5);
+  g.addColorStop(0, 'rgba(255,255,255,0.30)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(x0, CY - JOINT_R, x1 - x0, 5);
+
+  // Also specular on ash if present
+  if (p > 0) {
+    const cherryX = BODY_START + PAPER_LEN * p / 100;
+    const ag = ctx.createLinearGradient(0, CY - JOINT_R, 0, CY - JOINT_R + 4);
+    ag.addColorStop(0, 'rgba(255,255,255,0.12)');
+    ag.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = ag;
+    ctx.fillRect(BODY_START, CY - JOINT_R, cherryX - BODY_START, 4);
+  }
+}
+
+// ─── Main render loop ─────────────────────────────────────────────────────────
+const canvas = document.getElementById('joint-canvas');
+const ctx = canvas.getContext('2d');
+
+function render() {
+  ctx.clearRect(0, 0, CW, CH);
+
+  const p = state.burnPercent;
+  const cherryX = BODY_START + PAPER_LEN * p / 100;
+  const fv = updateFlicker(p);
+
+  // Update particles
+  particles.update(cherryX, CY, p);
+
+  // Ambient glow
+  drawAmbientGlow(ctx, cherryX, p, fv);
+
+  // Joint body layers
+  if (p > 0) drawAsh(ctx, cherryX, p);
+  drawPaper(ctx, cherryX, p);
+  drawTwist(ctx, p);
+  drawCherry(ctx, cherryX, p, fv);
+  drawFilter(ctx);
+  drawSpecular(ctx, p);
+
+  // Smoke on top
+  particles.render(ctx);
+
+  // Update page glow via CSS
+  if (p > 0 && p < 100) {
+    const blur = 12 + fv * 22;
+    const op = (0.25 + fv * 0.3) * Math.min(p / 8, 1);
+    canvas.style.boxShadow = `0 0 ${blur}px ${blur / 2}px rgba(255,90,0,${op.toFixed(2)})`;
+  } else {
+    canvas.style.boxShadow = 'none';
+  }
+
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+
+// ─── Slider ───────────────────────────────────────────────────────────────────
+const track = document.getElementById('slider-track');
+const thumb = document.getElementById('slider-thumb');
+const fill  = document.getElementById('slider-fill');
+const pctDisplay   = document.getElementById('pct-display');
+const statusLabel  = document.getElementById('status-label');
+
+let dragging = false;
+const THUMB_H = 24;
+
+function pctFromClientY(clientY) {
+  const rect = track.getBoundingClientRect();
+  const rel = (clientY - rect.top - THUMB_H / 2) / (rect.height - THUMB_H);
+  return Math.max(0, Math.min(1, rel)) * 100;
+}
+
+function setPercent(pct) {
+  state.burnPercent = pct;
+  const ratio = pct / 100;
+  const trackH = track.getBoundingClientRect().height || 340;
+  thumb.style.top = (ratio * (trackH - THUMB_H) + THUMB_H / 2 - THUMB_H / 2) + 'px';
+  fill.style.height = (ratio * 100) + '%';
+  pctDisplay.textContent = Math.round(pct) + '%';
+
+  if (pct === 0)       statusLabel.textContent = 'Unlit';
+  else if (pct < 5)    statusLabel.textContent = 'Lighting';
+  else if (pct < 30)   statusLabel.textContent = 'Fresh';
+  else if (pct < 60)   statusLabel.textContent = 'Burning';
+  else if (pct < 90)   statusLabel.textContent = 'Deep burn';
+  else if (pct < 100)  statusLabel.textContent = 'Roach';
+  else                 statusLabel.textContent = 'Done';
+}
+
+thumb.addEventListener('mousedown', e => { dragging = true; e.preventDefault(); });
+document.addEventListener('mousemove', e => { if (dragging) setPercent(pctFromClientY(e.clientY)); });
+document.addEventListener('mouseup', () => { dragging = false; });
+
+thumb.addEventListener('touchstart', e => { dragging = true; e.preventDefault(); }, { passive: false });
+document.addEventListener('touchmove', e => { if (dragging) setPercent(pctFromClientY(e.touches[0].clientY)); }, { passive: false });
+document.addEventListener('touchend', () => { dragging = false; });
+
+track.addEventListener('click', e => setPercent(pctFromClientY(e.clientY)));
+</script>
+</body>
+</html>
