@@ -540,6 +540,21 @@ def build_budget_template(vibe_name, sym, num_fmt, year=None):
     col_widths(bud, [6, 13, 13] + [14]*8 + [14, 13, 13])
     bud.freeze_panes = "C7"
 
+    # ── Helper table for donut chart (column layout required by Excel) ────────
+    # Donut/pie charts need data in a single column (one row per slice).
+    # We write category totals to a hidden helper area in cols P-Q of Budget sheet.
+    HELP_LABEL_COL = ncols_b + 2  # col P
+    HELP_VAL_COL   = ncols_b + 3  # col Q
+    bud.cell(row=5, column=HELP_LABEL_COL).value = "Category"
+    bud.cell(row=5, column=HELP_VAL_COL).value   = "Annual Total"
+    for ci, cat_name in enumerate(budget_cats):
+        src_col = get_column_letter(CAT_START + ci)
+        r = 6 + ci
+        bud.cell(row=r, column=HELP_LABEL_COL).value = cat_name
+        bud.cell(row=r, column=HELP_VAL_COL).value   = f"=SUM({src_col}7:{src_col}18)"
+        bud.cell(row=r, column=HELP_VAL_COL).number_format = num_fmt
+    help_end = 5 + len(budget_cats)
+
     # ── Now build charts referencing Budget sheet ─────────────────────────────
     # Bar chart: monthly income vs expenses
     inc_ref  = Reference(bud, min_col=INC_COL, min_row=6, max_row=18)
@@ -550,11 +565,11 @@ def build_budget_template(vibe_name, sym, num_fmt, year=None):
     chart_bar.set_categories(cats_ref)
     dash.add_chart(chart_bar, "A14")
 
-    # Donut: category totals (row 19 = totals, cols D-K)
-    cat_vals_ref   = Reference(bud, min_col=CAT_START, max_col=CAT_END, min_row=19)
-    cat_labels_ref = Reference(bud, min_col=CAT_START, max_col=CAT_END, min_row=6)
-    chart_donut.add_data(cat_vals_ref)
-    chart_donut.set_categories(cat_labels_ref)
+    # Donut: category totals from helper column table (one row per slice)
+    donut_vals   = Reference(bud, min_col=HELP_VAL_COL,   min_row=5, max_row=help_end)
+    donut_labels = Reference(bud, min_col=HELP_LABEL_COL, min_row=6, max_row=help_end)
+    chart_donut.add_data(donut_vals, titles_from_data=True)
+    chart_donut.set_categories(donut_labels)
     dash.add_chart(chart_donut, "I14")
 
     return wb
