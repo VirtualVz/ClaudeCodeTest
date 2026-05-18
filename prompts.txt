@@ -1,0 +1,2 @@
+1. I want you to make a.txt file in this folder, and I want you to add every prompt that I give you to the list. You can do this in just one file. I don't need you to make a different version every time it is updated, like with the other files.
+2. I also want you to add this to the CLAUDE.md file so that even if I restart the session, any prompts I have will still be saved to the txt file.

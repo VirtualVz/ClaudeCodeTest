@@ -47,6 +47,16 @@ Example: if `burning-joint-v2.html` exists and a change is requested, create `bu
 
 This must happen automatically at the end of every session in which any file is created or modified — do not wait for the user to ask.
 
+## Prompt Logging
+
+Every prompt the user sends must be appended to `prompts.txt` in the project root. This file is updated in place (never versioned). Format each entry as a numbered line:
+
+```
+N. <prompt text>
+```
+
+To find the next number, read the current contents of `prompts.txt` and increment the last entry's number. Do this at the start of every turn, before any other work.
+
 ## Architecture
 
 ### HTML files
