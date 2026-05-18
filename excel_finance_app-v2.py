@@ -310,10 +310,6 @@ def _dash_header(ws, vibe, font_name, title, subtitle, ncols=14):
         horizontal="left", vertical="top", indent=1)
     # Bottom stripe
     row_fill(ws, 4, 1, ncols, F(v["accent"]), height=3)
-    # Bg fill for entire header rows
-    for c in range(1, ncols + 1):
-        ws.cell(row=2, column=c).fill = F(v["bg"])
-        ws.cell(row=3, column=c).fill = F(v["bg"])
 
 
 def _currency_settings(ws, vibe, font_name, row, sym_default, ncols=14):
@@ -388,10 +384,10 @@ def build_budget_template(vibe_name, sym, num_fmt, year=None):
 
     budget_sheet = "Budget"
     kpi_data = [
-        ("TOTAL INCOME",    f"=IFERROR(SUM('{budget_sheet}'!C4:C15),0)", 1, 3),
-        ("TOTAL EXPENSES",  f"=IFERROR(SUM('{budget_sheet}'!L4:L15),0)", 4, 6),
-        ("NET SAVINGS",     f"=IFERROR(SUM('{budget_sheet}'!M4:M15),0)", 7, 9),
-        ("AVG SAVINGS RATE",f"=IFERROR(AVERAGE('{budget_sheet}'!N4:N15),0)", 10, 13),
+        ("TOTAL INCOME",    f"=IFERROR(SUM('{budget_sheet}'!C7:C18),0)", 1, 3),
+        ("TOTAL EXPENSES",  f"=IFERROR(SUM('{budget_sheet}'!L7:L18),0)", 4, 6),
+        ("NET SAVINGS",     f"=IFERROR(SUM('{budget_sheet}'!M7:M18),0)", 7, 9),
+        ("AVG SAVINGS RATE",f"=IFERROR(AVERAGE('{budget_sheet}'!N7:N18),0)", 10, 13),
     ]
     for label, formula, cs, ce in kpi_data:
         fmt = "0.0%" if "RATE" in label else num_fmt
@@ -424,8 +420,6 @@ def build_budget_template(vibe_name, sym, num_fmt, year=None):
     chart_bar.x_axis.title = "Month"
     chart_bar.width = 22; chart_bar.height = 14
     chart_bar.legend.position = "b"
-    chart_bar.y_axis.majorGridlines = None
-    chart_bar.plot_area.graphicalProperties = None
 
     # Donut chart
     chart_donut = DoughnutChart()
@@ -447,10 +441,10 @@ def build_budget_template(vibe_name, sym, num_fmt, year=None):
         r = 45 + mi
         row_data = [
             mname,
-            f"=IFERROR('{budget_sheet}'!C{4+mi},0)",
-            f"=IFERROR('{budget_sheet}'!L{4+mi},0)",
-            f"=IFERROR('{budget_sheet}'!M{4+mi},0)",
-            f"=IFERROR('{budget_sheet}'!N{4+mi},0)",
+            f"=IFERROR('{budget_sheet}'!C{7+mi},0)",
+            f"=IFERROR('{budget_sheet}'!L{7+mi},0)",
+            f"=IFERROR('{budget_sheet}'!M{7+mi},0)",
+            f"=IFERROR('{budget_sheet}'!N{7+mi},0)",
         ]
         fmts = [None, num_fmt, num_fmt, num_fmt, "0.0%"]
         table_row(dash, r, row_data, v, fn, col_start=1, alt=(mi%2==0), fmts=fmts)
@@ -543,7 +537,7 @@ def build_budget_template(vibe_name, sym, num_fmt, year=None):
         for c in range(INC_COL, CAT_END + 1):
             bud.cell(row=r, column=c).fill = input_fill
 
-    col_widths(bud, [6, 13] + [13]*3 + [14]*5 + [13]*3 + [14, 13, 13])
+    col_widths(bud, [6, 13, 13] + [14]*8 + [14, 13, 13])
     bud.freeze_panes = "C7"
 
     # ── Now build charts referencing Budget sheet ─────────────────────────────
